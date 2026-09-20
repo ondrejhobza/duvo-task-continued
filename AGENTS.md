@@ -45,6 +45,7 @@ Optimise for a working vertical slice, then polish. Do not add libraries without
 ## How to work
 
 - Do not write output files the user did not ask for. Report findings in your response, not as markdown summary, plan, or report files in the repo.
+- The project is under git on `main`, tracking `origin` at `github.com/ondrejhobza/duvo-task-continued`. Commit after each working step; do not push unless asked.
 
 This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
 

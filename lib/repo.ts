@@ -16,6 +16,7 @@ import {
   pendingInputSchema,
   evaluationStatusSchema,
   isAutoSelection,
+  isTerminalRunStatus,
   requirementCheckSchema,
   RUNS_PAGE_SIZE,
   storedModelSelectionSchema,
@@ -277,16 +278,22 @@ export async function saveRunContinuation(
  * The one-run-at-a-time rule, asked of the database rather than of the page
  * that happens to be open: two tabs, or a follow-up submitted from a stale
  * view, must not get past a check the composer only makes on the client.
+ *
+ * Deliberately the newest run rather than any unfinished one, which is the
+ * rule the composer already states. Anything older that never landed — a run
+ * stranded by a restart, say — is a thing to stop from the runs table, not a
+ * reason to lock the product for good.
  */
 export async function findActiveRun(): Promise<Run | null> {
   const db = await getDb();
   const row = await db
     .selectFrom("runs")
     .selectAll()
-    .where("status", "in", ["queued", "running", "awaiting_input"])
     .orderBy("created_at", "desc")
+    .orderBy("id", "desc")
     .executeTakeFirst();
-  return row ? toRun(row, []) : null;
+  if (!row || isTerminalRunStatus(row.status)) return null;
+  return toRun(row, []);
 }
 
 /** The follow-ups of a run, oldest first, so a chain reads in the order it happened. */

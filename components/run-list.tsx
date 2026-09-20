@@ -2,7 +2,7 @@
 
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { Brain, ChevronDown, Inbox, Loader2 } from "lucide-react";
+import { Brain, ChevronDown, CornerDownRight, Inbox, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   Table,
@@ -239,6 +239,16 @@ export function RunList({
               >
                 {run.prompt}
               </Link>
+              {/* Otherwise a follow-up reads as a second, unrelated run that
+                  appeared out of nowhere. */}
+              {run.parentRunId !== null && (
+                <span className="mt-0.5 flex items-center gap-1 text-xs text-muted-foreground">
+                  <CornerDownRight className="size-3" />
+                  {run.continuation === "resumed"
+                    ? "Continues the run below, in the same session"
+                    : "Continues the run below, from a summary"}
+                </span>
+              )}
             </TableCell>
             <TableCell className="relative z-10 align-top">
               <ArtifactLinks artifacts={run.artifacts} emptyLabel="—" />

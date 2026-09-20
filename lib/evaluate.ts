@@ -229,7 +229,17 @@ export interface RunEvidence {
  * model. Evidence is the final reply plus any files: a run that was never
  * asked for a file is judged on its reply alone.
  */
-export async function gatherEvidence(run: Run, workspaceDir: string): Promise<RunEvidence> {
+export async function gatherEvidence(
+  run: Run,
+  workspaceDir: string,
+  /**
+   * The instruction this run continues, when it is a follow-up. The verdict is
+   * still about the follow-up's own instruction — grading "make it shorter"
+   * against the original task would produce nonsense — but a judge that cannot
+   * see what "it" refers to would produce nonsense of a different kind.
+   */
+  earlier: string | null = null,
+): Promise<RunEvidence> {
   const checks: GateCheck[] = [];
   const resultText = (run.resultText ?? "").trim();
   const requestedFormats = namedOutputFormats(run.prompt);
@@ -327,7 +337,7 @@ export async function gatherEvidence(run: Run, workspaceDir: string): Promise<Ru
     checks,
     passed: checks.every((c) => c.passed),
     primaryArtifactName: readable[0]?.name ?? null,
-    body: renderEvidence(run, resultText, readable, heads),
+    body: renderEvidence(run, resultText, readable, heads, earlier),
   };
 }
 
@@ -336,8 +346,15 @@ function renderEvidence(
   resultText: string,
   readable: Artifact[],
   heads: Map<string, FileHead>,
+  earlier: string | null,
 ): string {
   const sections: string[] = [];
+
+  if (earlier !== null) {
+    sections.push(
+      `## Background: the earlier request this one follows\n\n${earlier}\n\nJudge only the task below, not this one.`,
+    );
+  }
 
   sections.push(
     `## The user's task\n\n${run.prompt}`,
@@ -526,7 +543,10 @@ async function gradeRun(runId: string, workspaceDir: string): Promise<Evaluation
     });
   }
 
-  const evidence = await gatherEvidence(run, workspaceDir);
+  // A follow-up is graded on what it was asked to do, with the request it
+  // continues supplied only as background.
+  const parent = run.parentRunId === null ? null : await getRun(run.parentRunId);
+  const evidence = await gatherEvidence(run, workspaceDir, parent?.prompt ?? null);
 
   // The gate settled it; no model call.
   if (!evidence.passed) {

@@ -10,6 +10,7 @@ import { EvaluationBadge } from "@/components/evaluation-badge";
 import { Markdown } from "@/components/markdown";
 import { RunClarification } from "@/components/run-clarification";
 import { RunEvaluation } from "@/components/run-evaluation";
+import { RunFollowUp } from "@/components/run-follow-up";
 import { RunStatusBadge } from "@/components/run-status-badge";
 import { RunSteps } from "@/components/run-steps";
 import { Badge } from "@/components/ui/badge";
@@ -67,7 +68,15 @@ export function findFailingStep(steps: RunStep[]): RunStep | null {
   return null;
 }
 
-export function RunDetail({ initialProgress }: { initialProgress: RunProgress }) {
+export function RunDetail({
+  initialProgress,
+  /** Set when another run is in flight, so a follow-up is refused for the same
+   * reason the composer on the home page refuses a new run. */
+  busyReason = null,
+}: {
+  initialProgress: RunProgress;
+  busyReason?: string | null;
+}) {
   const router = useRouter();
   const [progress, setProgress] = useState(initialProgress);
   const warnedRef = useRef(false);
@@ -180,6 +189,10 @@ export function RunDetail({ initialProgress }: { initialProgress: RunProgress })
               )}
             </Panel>
           )}
+
+          {/* Reads in the order the work happened: what was asked, what came
+              back, and the box that takes it further. */}
+          <RunFollowUp run={run} busyReason={busyReason} />
 
           <RunEvaluation run={run} onRecheck={() => setRecheckRequested(true)} />
 

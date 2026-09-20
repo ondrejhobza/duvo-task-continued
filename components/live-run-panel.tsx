@@ -11,6 +11,7 @@ import { EvaluationBadge } from "@/components/evaluation-badge";
 import { Markdown } from "@/components/markdown";
 import { FailurePanel, findFailingStep } from "@/components/run-detail";
 import { RunClarification } from "@/components/run-clarification";
+import { RunFollowUp } from "@/components/run-follow-up";
 import { RunStatusBadge } from "@/components/run-status-badge";
 import { StopRunButton } from "@/components/run-stop-button";
 import { RunSteps } from "@/components/run-steps";
@@ -265,6 +266,10 @@ export function LiveRunPanel({ initialProgress }: { initialProgress: RunProgress
             onResumed={() => router.refresh()}
           />
         )}
+
+        {/* A finished run is not a dead end: the next instruction goes to the
+            agent that did this work, not to the fresh one the box above starts. */}
+        {isTerminal(run) && <RunFollowUp run={run} />}
 
         {/* Open by default when the agent stopped mid-way: what it managed to do
             before it got stuck is the context for the question it is asking. */}

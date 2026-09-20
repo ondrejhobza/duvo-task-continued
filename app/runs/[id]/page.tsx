@@ -1,10 +1,12 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, ArrowRight, CornerDownRight } from "lucide-react";
 import { RunDetail, RunHeading } from "@/components/run-detail";
+import { RunStatusBadge } from "@/components/run-status-badge";
 import { StopRunButton } from "@/components/run-stop-button";
 import { Button } from "@/components/ui/button";
-import { getRun, listRunEvents } from "@/lib/repo";
+import { findActiveRun, getRun, listRunContinuations, listRunEvents } from "@/lib/repo";
+import type { Run } from "@/lib/schema";
 import { deriveRunSteps } from "@/lib/steps";
 
 export const dynamic = "force-dynamic";
@@ -14,8 +16,15 @@ export default async function RunPage({ params }: PageProps<"/runs/[id]">) {
   const run = await getRun(id);
   if (!run) notFound();
 
-  const events = await listRunEvents(run.id);
+  const [events, parent, continuations, active] = await Promise.all([
+    listRunEvents(run.id),
+    run.parentRunId === null ? null : getRun(run.parentRunId),
+    listRunContinuations(run.id),
+    findActiveRun(),
+  ]);
   const derived = deriveRunSteps(events, run.status, run.startedAt, run.cancelRequestedAt !== null);
+  // A run cannot be continued while any run is going, including this one.
+  const busyReason = active === null ? null : followUpBusyReason(active);
 
   return (
     <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 p-4 sm:p-6">
@@ -39,7 +48,67 @@ export default async function RunPage({ params }: PageProps<"/runs/[id]">) {
         <StopRunButton run={run} />
       </header>
 
-      <RunDetail initialProgress={{ run, ...derived }} />
+      <RunChain run={run} parent={parent} continuations={continuations} />
+
+      <RunDetail initialProgress={{ run, ...derived }} busyReason={busyReason} />
     </main>
   );
+}
+
+/**
+ * Where this run sits in a chain of follow-ups, and how to get to the rest of
+ * it. Absent for a run that neither continues anything nor was continued, which
+ * is most of them.
+ */
+function RunChain({
+  run,
+  parent,
+  continuations,
+}: {
+  run: Run;
+  parent: Run | null;
+  continuations: Run[];
+}) {
+  if (!parent && continuations.length === 0) return null;
+
+  return (
+    <section className="flex flex-col gap-2 rounded-xl border bg-card p-4">
+      <p className="text-xs font-medium text-muted-foreground">Part of a longer conversation</p>
+
+      {parent && (
+        <p className="flex flex-wrap items-center gap-2 text-sm">
+          <CornerDownRight className="size-4 shrink-0 text-muted-foreground" />
+          <span className="text-muted-foreground">
+            {/* The distinction the whole feature turns on, kept visible after
+                the fact: this run either remembered the earlier one or was
+                handed a summary of it. */}
+            {run.continuation === "resumed"
+              ? "Continues, in the same session:"
+              : "Continues, from a written summary:"}
+          </span>
+          <Link href={`/runs/${parent.id}`} className="min-w-0 truncate font-medium hover:underline">
+            {parent.prompt}
+          </Link>
+        </p>
+      )}
+
+      {continuations.map((child) => (
+        <p key={child.id} className="flex flex-wrap items-center gap-2 text-sm">
+          <ArrowRight className="size-4 shrink-0 text-muted-foreground" />
+          <span className="text-muted-foreground">Carried on by:</span>
+          <Link href={`/runs/${child.id}`} className="min-w-0 truncate font-medium hover:underline">
+            {child.prompt}
+          </Link>
+          <RunStatusBadge status={child.status} run={child} />
+        </p>
+      ))}
+    </section>
+  );
+}
+
+/** The composer's wording, applied to the follow-up field on this page. */
+function followUpBusyReason(active: Run): string {
+  return active.status === "awaiting_input"
+    ? "The run in progress is waiting on an answer. Deal with that before carrying this one on."
+    : "A run is still going. It will finish on its own; you can carry this one on then.";
 }

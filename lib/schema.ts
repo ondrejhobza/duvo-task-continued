@@ -893,12 +893,14 @@ export type CancelRunInput = z.infer<typeof cancelRunSchema>;
  * Body of POST /api/runs/[id]/follow-up. The same limits as a first
  * instruction: a follow-up is an instruction, just one with a history behind it.
  */
+export const FOLLOW_UP_MAX = 4000;
+
 export const followUpSchema = z.object({
   prompt: z
     .string()
     .trim()
     .min(1, "Say what the agent should do next.")
-    .max(4000, "Keep instructions under 4000 characters."),
+    .max(FOLLOW_UP_MAX, `Keep instructions under ${FOLLOW_UP_MAX} characters.`),
 });
 export type FollowUpInput = z.infer<typeof followUpSchema>;
 

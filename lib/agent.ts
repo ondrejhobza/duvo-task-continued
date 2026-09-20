@@ -359,7 +359,7 @@ async function resolveContinuation(run: Run): Promise<Continued> {
 
   // The chain shares one workspace, so a follow-up can read, edit and build on
   // the files the first run produced instead of starting on an empty directory.
-  const cwd = await rootWorkspaceDir(parent);
+  const cwd = await runChainWorkspaceDir(parent);
   const sessionId = await getRunSession(parent.id);
   if (sessionId && (await sessionTranscriptExists(sessionId, cwd))) {
     return { resume: sessionId, cwd, brief: null };
@@ -368,7 +368,7 @@ async function resolveContinuation(run: Run): Promise<Continued> {
 }
 
 /** Follows the chain to the run that owns the workspace the others share. */
-async function rootWorkspaceDir(run: Run): Promise<string> {
+export async function runChainWorkspaceDir(run: Run): Promise<string> {
   let current = run;
   // Bounded: a chain longer than this is a loop, and the workspace of the run
   // in hand is a safe answer either way.
