@@ -1,4 +1,4 @@
-# Duvo automations
+# Automations platform
 
 A small agentic automation platform. You give an agent instructions in plain text, it works unattended through the Claude Agent SDK, you watch it unfold step by step, download whatever it produced, optionally let it read and, if you allow it, change your Notion workspace over MCP, and evaluate whether the run did what was asked.
 
