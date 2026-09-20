@@ -5,9 +5,13 @@ import type { RunEvent } from "@/lib/repo";
 import {
   agentModelIdSchema,
   agentModelName,
+  currentTurn,
+  type Run,
   type RunPhase,
+  type RunProgress,
   type RunStatus,
   type RunStep,
+  type RunTurnProgress,
 } from "@/lib/schema";
 
 /**
@@ -527,6 +531,53 @@ export function deriveRunSteps(
     phase: derivePhase(steps, runStatus, cancelRequested),
     filesWritten: [...filesWritten],
     mcpServersUsed,
+  };
+}
+
+/**
+ * Everything a view needs to show a run: what is happening in the turn under
+ * way, and the whole conversation behind it.
+ *
+ * The two are built from the same events on purpose. The live view watches the
+ * current turn — replaying four turns of steps every second would bury the one
+ * thing that is moving — while the history thread reads each turn's steps
+ * under the instruction that caused them. One derivation, so they can never
+ * disagree about what happened.
+ */
+export function buildRunProgress(run: Run, events: RunEvent[]): RunProgress {
+  const current = currentTurn(run);
+  const currentSeq = current?.seq ?? 1;
+
+  const turns: RunTurnProgress[] = run.turns.map((turn) => ({
+    ...turn,
+    steps: deriveRunSteps(
+      events.filter((event) => event.turn === turn.seq),
+      turn.status,
+      turn.startedAt,
+    ).steps,
+  }));
+
+  const derived = deriveRunSteps(
+    // Events from before the turns table existed carry turn 1, which is also
+    // the only turn those runs have; nothing is dropped by filtering.
+    events.filter((event) => event.turn === currentSeq),
+    run.status,
+    current?.startedAt ?? run.startedAt,
+    run.cancelRequestedAt !== null,
+  );
+
+  // Files and servers belong to the run rather than to one turn: a file an
+  // earlier turn wrote is still sitting in the workspace, and the header would
+  // be lying to drop it the moment a follow-up starts.
+  const whole = deriveRunSteps(events, run.status, run.startedAt);
+
+  return {
+    run,
+    steps: derived.steps,
+    phase: derived.phase,
+    filesWritten: whole.filesWritten,
+    mcpServersUsed: whole.mcpServersUsed,
+    turns,
   };
 }
 

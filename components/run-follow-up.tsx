@@ -15,10 +15,10 @@ import { canFollowUp, FOLLOW_UP_MAX, type Run } from "@/lib/schema";
  * already looking at that run.
  *
  * Deliberately not the composer at the top of the page: that one starts a fresh
- * agent that knows nothing, this one continues the agent on screen. The two are
- * the same gesture and share the same field, so the difference is carried by
- * where it sits, what it is called, and a line that says in plain words how
- * much of this run the next one will actually have.
+ * agent that knows nothing, this one adds a turn to the run on screen. The two
+ * are the same gesture and share the same field, so the difference is carried
+ * by where it sits, what it is called, and a line that says in plain words how
+ * much of the conversation the next turn will actually have.
  */
 export function RunFollowUp({
   run,
@@ -86,10 +86,10 @@ export function RunFollowUp({
       toast.success(
         payload.continuation === "resumed"
           ? "Picking up where it left off, in the same session."
-          : "Started as a new session: the agent was given a summary of the earlier run, not its memory of it.",
+          : "Started in a new session: the agent was given a summary of the conversation so far, not its memory of it.",
       );
-      // The follow-up is now the newest run, which is what the live panel
-      // follows and what the table lists first.
+      // The run has gone back to work, so the panel around this box needs to
+      // start watching it again and the new turn needs to appear in the thread.
       router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not send the follow-up.");
@@ -108,8 +108,8 @@ export function RunFollowUp({
         {blocked
           ? busyReason
           : run.resumable
-            ? "Continues this run in the same session: the agent still has the work above in mind. The box at the top of the page starts a fresh agent instead."
-            : "This run's session is no longer open, so the agent will be given a written summary of it rather than remembering it. Repeat anything it needs to know."}
+            ? "Adds a turn to this run, in the same session: the agent still has the work above in mind, and it all stays on this one record. The box at the top of the page starts a fresh agent instead."
+            : "This run's session is no longer open, so the agent will be given a written summary of the conversation rather than remembering it. Repeat anything it needs to know."}
       </p>
 
       <form

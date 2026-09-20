@@ -6,13 +6,13 @@ import {
   type RunArtifactsTable,
   type RunEvaluationsTable,
   type RunsTable,
+  type RunTurnsTable,
 } from "@/lib/db";
 import {
   agentModelIdSchema,
   clarificationAnswerSchema,
   clarificationStateSchema,
   continuationSchema,
-  DEFAULT_AGENT_MODEL_ID,
   pendingInputSchema,
   evaluationStatusSchema,
   isAutoSelection,
@@ -41,6 +41,7 @@ import {
   type Run,
   type RunClarification,
   type RunStatus,
+  type RunTurn,
   type UpdateMcpServerInput,
   type Verdict,
 } from "@/lib/schema";
@@ -154,7 +155,27 @@ function toClarification(row: RunRow): RunClarification {
   };
 }
 
-function toRun(row: RunRow, artifacts: Artifact[], evaluation: Evaluation | null = null): Run {
+function toTurn(row: Selectable<RunTurnsTable>): RunTurn {
+  return {
+    seq: row.seq,
+    prompt: row.prompt,
+    status: row.status,
+    resultText: row.result_text,
+    error: row.error,
+    model: row.model,
+    costUsd: row.cost_usd === null ? null : Number(row.cost_usd),
+    startedAt: toIso(row.started_at),
+    finishedAt: toIso(row.finished_at),
+    continuation: continuationSchema.safeParse(row.continuation).data ?? "none",
+  };
+}
+
+function toRun(
+  row: RunRow,
+  artifacts: Artifact[],
+  evaluation: Evaluation | null = null,
+  turns: RunTurn[] = [],
+): Run {
   return {
     id: row.id,
     prompt: row.prompt,
@@ -175,6 +196,25 @@ function toRun(row: RunRow, artifacts: Artifact[], evaluation: Evaluation | null
     startedAt: toIso(row.started_at),
     finishedAt: toIso(row.finished_at),
     cancelRequestedAt: toIso(row.cancel_requested_at),
+    // A run always has at least one turn on file; the fallback covers the
+    // moment between the row being written and its first turn landing.
+    turns:
+      turns.length > 0
+        ? turns
+        : [
+            {
+              seq: 1,
+              prompt: row.prompt,
+              status: row.status,
+              resultText: row.result_text,
+              error: row.error,
+              model: row.model,
+              costUsd: row.cost_usd === null ? null : Number(row.cost_usd),
+              startedAt: toIso(row.started_at),
+              finishedAt: toIso(row.finished_at),
+              continuation: "none",
+            },
+          ],
     parentRunId: row.parent_run_id,
     continuation: continuationSchema.safeParse(row.continuation).data ?? "none",
     // What the database knows: this run held a session. Whether that session's
@@ -206,41 +246,183 @@ export async function createRun(
     })
     .returningAll()
     .executeTakeFirstOrThrow();
+
+  // The first turn of the conversation. Written here rather than when the
+  // runner starts, so a run is never on file without the instruction that
+  // created it.
+  await db
+    .insertInto("run_turns")
+    .values({
+      id: randomUUID(),
+      run_id: row.id,
+      seq: 1,
+      prompt,
+      status: "queued",
+      continuation: "none",
+    })
+    .execute();
+
   return toRun(row, []);
 }
 
+export type AppendTurnResult =
+  | { ok: true; run: Run; seq: number }
+  | { ok: false; reason: "not_found" | "still_running" };
+
 /**
- * Starts a run that continues an earlier one. It is its own row on purpose:
- * cost, steps, duration and the outcome verdict all belong to the instruction
- * that caused them, and folding a follow-up into the original record would
- * overwrite the first answer and leave the judge grading the second piece of
- * work against the first request.
+ * Adds a turn to a run and puts the run back to work.
  *
- * The settings are inherited rather than re-asked: a follow-up to a run is
- * plainly meant to happen under the same conditions.
+ * A follow-up belongs to the run it continues rather than to a new record of
+ * its own: it is the same conversation, in the same session, in the same
+ * workspace, and the user reads it as one thread. So the run's own status,
+ * result and cost move on to describe the new turn, while the previous turn
+ * keeps its instruction, its answer and its steps for the history view.
+ *
+ * Guarded in SQL on the run being finished, so two follow-ups submitted at
+ * once cannot both start a turn.
  */
-export async function createFollowUpRun(parent: Run, prompt: string): Promise<Run> {
+export async function appendRunTurn(id: string, prompt: string): Promise<AppendTurnResult> {
+  const db = await getDb();
+
+  const restarted = await sql<{ id: string }>`
+    update runs
+       set status = 'queued',
+           -- This run is the live one again, whatever has been started since.
+           last_activity_at = now(),
+           -- The previous turn's answer belongs to that turn, not to this one:
+           -- leaving it here would show the old reply as the new one until the
+           -- agent got round to replacing it.
+           result_text = null,
+           error = null,
+           finished_at = null,
+           -- A run stopped earlier is being asked to carry on, so the old stop
+           -- must not be read as a stop of the turn just starting.
+           cancel_requested_at = null,
+           -- The user has already decided what they want; asking them to
+           -- clarify their follow-up before it starts would be absurd.
+           clarification_state = 'not_needed',
+           clarification_questions = '[]'::jsonb,
+           clarification_answers = '[]'::jsonb
+     where id = ${id}
+       and status in ('succeeded', 'failed', 'cancelled')
+    returning id
+  `.execute(db);
+
+  if (restarted.rows.length === 0) {
+    const exists = await db
+      .selectFrom("runs")
+      .select("id")
+      .where("id", "=", id)
+      .executeTakeFirst();
+    return { ok: false, reason: exists ? "still_running" : "not_found" };
+  }
+
+  const next = await sql<{ seq: number }>`
+    insert into run_turns (id, run_id, seq, prompt, status, continuation)
+    select ${randomUUID()}, ${id}, coalesce(max(seq), 0) + 1, ${prompt}, 'queued', 'seeded'
+      from run_turns where run_id = ${id}
+    returning seq
+  `.execute(db);
+
+  // The verdict described the turn before this one. Cleared rather than left
+  // standing, so the run is not shown carrying a pass for work the new
+  // instruction may have replaced; the turn that is starting earns its own.
+  await db.deleteFrom("run_evaluations").where("run_id", "=", id).execute();
+
+  const run = await getRun(id);
+  if (!run) return { ok: false, reason: "not_found" };
+  return { ok: true, run, seq: Number(next.rows[0]?.seq ?? run.turns.length) };
+}
+
+/** The turn the runner is working on: the last one, whatever state it is in. */
+export async function currentTurnSeq(id: string): Promise<number> {
   const db = await getDb();
   const row = await db
-    .insertInto("runs")
-    .values({
-      id: randomUUID(),
-      prompt,
-      status: "queued",
-      mcp_servers: jsonb(parent.mcpServers),
-      requested_model: parent.requestedModel ?? DEFAULT_AGENT_MODEL_ID,
-      resolved_model: isAutoSelection(parent.requestedModel) ? null : parent.resolvedModel,
-      reasoning: parent.reasoning,
-      parent_run_id: parent.id,
-      // Settled by the runner once it knows whether the session reopened.
-      continuation: "seeded",
-      // A follow-up is an answer to a question the user has already thought
-      // about, so the pre-run clarifier is skipped rather than asking again.
-      clarification_state: "not_needed",
+    .selectFrom("run_turns")
+    .select((eb) => eb.fn.max<number>("seq").as("seq"))
+    .where("run_id", "=", id)
+    .executeTakeFirst();
+  return Number(row?.seq ?? 1);
+}
+
+/**
+ * Marks the current turn as started, and records what it turned out to
+ * inherit. Written at the start rather than the end because the UI tells the
+ * user whether the agent remembers the earlier turns, and they need that while
+ * it works, not once it has finished.
+ */
+export async function markTurnRunning(
+  id: string,
+  seq: number,
+  continuation: Continuation,
+): Promise<void> {
+  const db = await getDb();
+  await db
+    .updateTable("run_turns")
+    .set({ status: "running", started_at: new Date().toISOString(), continuation })
+    .where("run_id", "=", id)
+    .where("seq", "=", seq)
+    .execute();
+  await db.updateTable("runs").set({ continuation }).where("id", "=", id).execute();
+}
+
+export interface FinishTurnInput {
+  status: Extract<RunStatus, "succeeded" | "failed" | "cancelled">;
+  resultText: string | null;
+  error: string | null;
+  model: string | null;
+  costUsd: number | null;
+  numTurns: number | null;
+  continuation: Continuation;
+}
+
+/**
+ * Closes a turn and rolls it up into the run.
+ *
+ * The run keeps the totals — cost and SDK turns accumulate over the whole
+ * conversation, because that is what the run cost — while status, result and
+ * model take the latest turn's values, because that is what "this run" means
+ * when someone looks at it now.
+ */
+export async function finishTurn(
+  id: string,
+  seq: number,
+  input: FinishTurnInput,
+): Promise<void> {
+  const db = await getDb();
+  const finishedAt = new Date().toISOString();
+
+  await db
+    .updateTable("run_turns")
+    .set({
+      status: input.status,
+      result_text: input.resultText,
+      error: input.error,
+      model: input.model,
+      cost_usd: input.costUsd,
+      num_turns: input.numTurns,
+      continuation: input.continuation,
+      finished_at: finishedAt,
     })
-    .returningAll()
-    .executeTakeFirstOrThrow();
-  return toRun(row, []);
+    .where("run_id", "=", id)
+    .where("seq", "=", seq)
+    .execute();
+
+  // The casts are load-bearing: an untyped parameter next to a bare `0` is
+  // resolved as an integer, which rejects a cost of $0.81 outright.
+  await sql`
+    update runs
+       set status = ${input.status},
+           last_activity_at = ${finishedAt},
+           result_text = ${input.resultText},
+           error = ${input.error},
+           model = coalesce(${input.model}, model),
+           cost_usd = coalesce(cost_usd, 0) + coalesce(${input.costUsd}::numeric, 0),
+           num_turns = coalesce(num_turns, 0) + coalesce(${input.numTurns}::integer, 0),
+           continuation = ${input.continuation},
+           finished_at = ${finishedAt}
+     where id = ${id}
+  `.execute(db);
 }
 
 /** The run whose session a follow-up should reopen, with its own id. */
@@ -279,8 +461,10 @@ export async function saveRunContinuation(
  * that happens to be open: two tabs, or a follow-up submitted from a stale
  * view, must not get past a check the composer only makes on the client.
  *
- * Deliberately the newest run rather than any unfinished one, which is the
- * rule the composer already states. Anything older that never landed — a run
+ * Ordered by last activity rather than by age, which is the difference a
+ * multi-turn run makes: a run started yesterday and picked up a minute ago is
+ * the live one, however many runs were started in between. Only the most
+ * recently active run can block, so anything older that never landed — a run
  * stranded by a restart, say — is a thing to stop from the runs table, not a
  * reason to lock the product for good.
  */
@@ -289,11 +473,12 @@ export async function findActiveRun(): Promise<Run | null> {
   const row = await db
     .selectFrom("runs")
     .selectAll()
-    .orderBy("created_at", "desc")
+    .orderBy(sql`coalesce(last_activity_at, created_at)`, "desc")
     .orderBy("id", "desc")
     .executeTakeFirst();
   if (!row || isTerminalRunStatus(row.status)) return null;
-  return toRun(row, []);
+  const turns = await turnsByRun([row.id]);
+  return toRun(row, [], null, turns.get(row.id) ?? []);
 }
 
 /** The follow-ups of a run, oldest first, so a chain reads in the order it happened. */
@@ -623,11 +808,36 @@ export async function getRun(id: string): Promise<Run | null> {
     .where("id", "=", id)
     .executeTakeFirst();
   if (!row) return null;
-  const [artifacts, evaluations] = await Promise.all([
+  const [artifacts, evaluations, turns] = await Promise.all([
     artifactsByRun([row.id]),
     evaluationsByRun([row.id]),
+    turnsByRun([row.id]),
   ]);
-  return toRun(row, artifacts.get(row.id) ?? [], evaluations.get(row.id) ?? null);
+  return toRun(
+    row,
+    artifacts.get(row.id) ?? [],
+    evaluations.get(row.id) ?? null,
+    turns.get(row.id) ?? [],
+  );
+}
+
+/** Every turn of each run asked for, oldest first. One query for a whole page. */
+async function turnsByRun(runIds: string[]): Promise<Map<string, RunTurn[]>> {
+  const grouped = new Map<string, RunTurn[]>();
+  if (runIds.length === 0) return grouped;
+  const db = await getDb();
+  const rows = await db
+    .selectFrom("run_turns")
+    .selectAll()
+    .where("run_id", "in", runIds)
+    .orderBy("seq", "asc")
+    .execute();
+  for (const row of rows) {
+    const list = grouped.get(row.run_id) ?? [];
+    list.push(toTurn(row));
+    grouped.set(row.run_id, list);
+  }
+  return grouped;
 }
 
 async function evaluationsByRun(runIds: string[]): Promise<Map<string, Evaluation>> {
@@ -645,12 +855,18 @@ async function evaluationsByRun(runIds: string[]): Promise<Map<string, Evaluatio
 
 async function hydrate(rows: RunRow[]): Promise<Run[]> {
   const ids = rows.map((r) => r.id);
-  const [artifacts, evaluations] = await Promise.all([
+  const [artifacts, evaluations, turns] = await Promise.all([
     artifactsByRun(ids),
     evaluationsByRun(ids),
+    turnsByRun(ids),
   ]);
   return rows.map((row) =>
-    toRun(row, artifacts.get(row.id) ?? [], evaluations.get(row.id) ?? null),
+    toRun(
+      row,
+      artifacts.get(row.id) ?? [],
+      evaluations.get(row.id) ?? null,
+      turns.get(row.id) ?? [],
+    ),
   );
 }
 
@@ -1088,13 +1304,20 @@ export async function resumeRunWithClarification(
 /** Transition queued -> running. Returns false if the run was already claimed. */
 export async function markRunning(id: string): Promise<boolean> {
   const db = await getDb();
-  const result = await db
-    .updateTable("runs")
-    .set({ status: "running", started_at: new Date().toISOString() })
-    .where("id", "=", id)
-    .where("status", "=", "queued")
-    .executeTakeFirst();
-  return Number(result.numUpdatedRows) === 1;
+  const now = new Date().toISOString();
+  const result = await sql<{ id: string }>`
+    update runs
+       set status = 'running',
+           last_activity_at = ${now},
+           -- Only the first time. A later turn keeps the run's original start,
+           -- because that is when the user started this piece of work; the
+           -- turn's own clock is on the turn.
+           started_at = coalesce(started_at, ${now})
+     where id = ${id}
+       and status = 'queued'
+    returning id
+  `.execute(db);
+  return result.rows.length === 1;
 }
 
 export interface FinishRunInput {
@@ -1174,14 +1397,26 @@ export async function requestRunCancellation(id: string): Promise<RequestCancell
  */
 export async function markRunCancelled(id: string): Promise<boolean> {
   const db = await getDb();
+  const finishedAt = new Date().toISOString();
   const result = await db
     .updateTable("runs")
-    .set({ status: "cancelled", finished_at: new Date().toISOString() })
+    .set({ status: "cancelled", finished_at: finishedAt, last_activity_at: finishedAt })
     .where("id", "=", id)
     .where("status", "in", ["queued", "running", "awaiting_input"])
     .where("cancel_requested_at", "is not", null)
     .executeTakeFirst();
-  return Number(result.numUpdatedRows) === 1;
+  if (Number(result.numUpdatedRows) !== 1) return false;
+
+  // The turn the user stopped is closed with it, so the history reads "you
+  // stopped this one" against the instruction it actually belonged to.
+  await sql`
+    update run_turns
+       set status = 'cancelled', finished_at = ${finishedAt}
+     where run_id = ${id}
+       and seq = (select max(seq) from run_turns where run_id = ${id})
+       and status not in ('succeeded', 'failed', 'cancelled')
+  `.execute(db);
+  return true;
 }
 
 export interface RunCancellation {
@@ -1206,13 +1441,15 @@ export interface RunEvent {
   type: string;
   payload: unknown;
   createdAt: string;
+  /** The turn of the conversation this happened in; 1 on a single-turn run. */
+  turn: number;
 }
 
 export async function listRunEvents(runId: string): Promise<RunEvent[]> {
   const db = await getDb();
   const rows = await db
     .selectFrom("run_events")
-    .select(["seq", "type", "payload", "created_at"])
+    .select(["seq", "type", "payload", "created_at", "turn"])
     .where("run_id", "=", runId)
     .orderBy("seq", "asc")
     .execute();
@@ -1221,6 +1458,7 @@ export async function listRunEvents(runId: string): Promise<RunEvent[]> {
     type: row.type,
     payload: row.payload,
     createdAt: toIso(row.created_at) ?? new Date().toISOString(),
+    turn: Number(row.turn ?? 1),
   }));
 }
 
@@ -1241,13 +1479,18 @@ export async function appendRunEvent(
 ): Promise<number> {
   const db = await getDb();
   const inserted = await sql<{ seq: number }>`
-    insert into run_events (id, run_id, seq, type, payload)
+    insert into run_events (id, run_id, seq, type, payload, turn)
     select
       ${randomUUID()},
       ${runId},
       coalesce(max(seq), 0) + 1,
       ${type},
-      ${JSON.stringify(payload)}::jsonb
+      ${JSON.stringify(payload)}::jsonb,
+      -- Whichever turn is open. Resolved here rather than passed in, because
+      -- every writer — the loop, the answer route, the stop — is by definition
+      -- writing about the turn in progress, and none of them should have to
+      -- carry the number around to say so.
+      (select coalesce(max(seq), 1) from run_turns where run_id = ${runId})
     from run_events
     where run_id = ${runId}
     returning seq

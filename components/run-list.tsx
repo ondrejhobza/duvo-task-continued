@@ -2,7 +2,7 @@
 
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { Brain, ChevronDown, CornerDownRight, Inbox, Loader2 } from "lucide-react";
+import { Brain, ChevronDown, CornerDownRight, Inbox, Loader2, MessagesSquare } from "lucide-react";
 import { toast } from "sonner";
 import {
   Table,
@@ -17,12 +17,14 @@ import { EvaluationBadge } from "@/components/evaluation-badge";
 import { RunStatusBadge } from "@/components/run-status-badge";
 import { StopRunButton } from "@/components/run-stop-button";
 import { Button } from "@/components/ui/button";
-import { formatDateTime, formatDuration, formatMoney } from "@/lib/format";
+import { formatDateTime, formatMoney, formatMs } from "@/lib/format";
 import {
   describeRunModel,
   isTerminalRunStatus,
+  latestPrompt,
   runPageSchema,
   runSchema,
+  runWorkingMs,
   RUNS_PAGE_SIZE,
   type Run,
 } from "@/lib/schema";
@@ -239,8 +241,23 @@ export function RunList({
               >
                 {run.prompt}
               </Link>
-              {/* Otherwise a follow-up reads as a second, unrelated run that
-                  appeared out of nowhere. */}
+              {/* A conversation is titled by the instruction that started it —
+                  that is what the run is — so the latest one goes underneath
+                  rather than replacing it. Without this the row would claim a
+                  three-turn run is still doing the first thing it was asked. */}
+              {run.turns.length > 1 && (
+                <span
+                  className="mt-0.5 flex items-center gap-1 text-xs text-muted-foreground"
+                  title={latestPrompt(run)}
+                >
+                  <MessagesSquare className="size-3 shrink-0" />
+                  <span className="tabular-nums">{run.turns.length} turns</span>
+                  <span className="min-w-0 truncate">· then: {latestPrompt(run)}</span>
+                </span>
+              )}
+              {/* One of the few runs recorded as a follow-up of its own, before
+                  follow-ups became turns. Otherwise it reads as a second,
+                  unrelated run that appeared out of nowhere. */}
               {run.parentRunId !== null && (
                 <span className="mt-0.5 flex items-center gap-1 text-xs text-muted-foreground">
                   <CornerDownRight className="size-3" />
@@ -254,11 +271,20 @@ export function RunList({
               <ArtifactLinks artifacts={run.artifacts} emptyLabel="—" />
             </TableCell>
             <ModelCell run={run} />
-            <TableCell className="align-top tabular-nums text-muted-foreground">
+            <TableCell
+              className="align-top tabular-nums text-muted-foreground"
+              title={
+                run.turns.length > 1 && run.finishedAt
+                  ? `Last active ${formatDateTime(run.finishedAt)}`
+                  : undefined
+              }
+            >
               {formatDateTime(run.createdAt)}
             </TableCell>
             <TableCell className="text-right align-top tabular-nums">
-              {formatDuration(run.startedAt, run.finishedAt)}
+              {/* Time worked, summed over the turns: the gap between a run
+                  finishing and being picked up again is not work. */}
+              {formatMs(runWorkingMs(run))}
             </TableCell>
             <TableCell className="text-right align-top tabular-nums">
               {formatMoney(run.costUsd)}

@@ -3,33 +3,26 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { LiveRunPanel } from "@/components/live-run-panel";
 import { RunComposer } from "@/components/run-composer";
 import { RunList } from "@/components/run-list";
-import { getRunSummary, listMcpServers, listRunEvents, listRunsPage } from "@/lib/repo";
+import { findActiveRun, getRunSummary, listMcpServers, listRunEvents, listRunsPage } from "@/lib/repo";
 import type { Run } from "@/lib/schema";
-import { deriveRunSteps } from "@/lib/steps";
+import { buildRunProgress } from "@/lib/steps";
 
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
-  const [summary, firstPage, mcpServers] = await Promise.all([
+  const [summary, firstPage, mcpServers, active] = await Promise.all([
     getRunSummary(),
     listRunsPage(),
     listMcpServers(),
+    findActiveRun(),
   ]);
-  // The live panel follows the newest run and is rebuilt from the database on
-  // every request, so a reload in the middle of a run — or while it waits for an
-  // answer — comes back to exactly where the run is.
-  const latest = firstPage.runs[0] ?? null;
-  const latestProgress = latest
-    ? {
-        run: latest,
-        ...deriveRunSteps(
-          await listRunEvents(latest.id),
-          latest.status,
-          latest.startedAt,
-          latest.cancelRequestedAt !== null,
-        ),
-      }
-    : null;
+  // The panel follows whatever is live, falling back to the newest run when
+  // nothing is. The two are usually the same run; they part company when an
+  // older run is picked up again with a follow-up, and then it is the one
+  // working that the user wants to watch. Rebuilt from the database on every
+  // request, so a reload mid-run comes back to exactly where the run is.
+  const latest = active ?? firstPage.runs[0] ?? null;
+  const latestProgress = latest ? buildRunProgress(latest, await listRunEvents(latest.id)) : null;
 
   return (
     <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 p-4 sm:p-6">

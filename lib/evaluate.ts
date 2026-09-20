@@ -4,6 +4,7 @@ import { resolveArtifactPath } from "@/lib/artifacts";
 import { beginEvaluation, getRun, saveEvaluation, type SaveEvaluationInput } from "@/lib/repo";
 import {
   judgeResultSchema,
+  latestPrompt,
   type Artifact,
   type Evaluation,
   type GateCheck,
@@ -233,16 +234,20 @@ export async function gatherEvidence(
   run: Run,
   workspaceDir: string,
   /**
-   * The instruction this run continues, when it is a follow-up. The verdict is
-   * still about the follow-up's own instruction — grading "make it shorter"
-   * against the original task would produce nonsense — but a judge that cannot
-   * see what "it" refers to would produce nonsense of a different kind.
+   * An instruction from outside this run that it continues. Only used by the
+   * few runs created while follow-ups were separate records; a run's own
+   * earlier turns are read off the run itself, below.
    */
   earlier: string | null = null,
 ): Promise<RunEvidence> {
   const checks: GateCheck[] = [];
   const resultText = (run.resultText ?? "").trim();
-  const requestedFormats = namedOutputFormats(run.prompt);
+  // A multi-turn run is judged on where it has got to: the latest instruction
+  // against the latest reply. Grading "now make it shorter" against the
+  // original task would produce nonsense, and one verdict per run — replaced
+  // each turn rather than added to — is also what keeps the "did what was
+  // asked" rate counting each run once however long the conversation runs.
+  const requestedFormats = namedOutputFormats(latestPrompt(run));
 
   // Read the text artifacts up front; the checks and the evidence both need them.
   const heads = new Map<string, FileHead>();
@@ -350,14 +355,24 @@ function renderEvidence(
 ): string {
   const sections: string[] = [];
 
-  if (earlier !== null) {
+  // Everything the conversation asked for before the instruction being judged.
+  // The judge needs it to know what "it" refers to in "now make it shorter",
+  // and needs telling just as plainly that it is not what is being graded.
+  const background = [
+    earlier,
+    ...run.turns.slice(0, -1).map((turn) => turn.prompt),
+  ].filter((text): text is string => text !== null && text.trim().length > 0);
+
+  if (background.length > 0) {
     sections.push(
-      `## Background: the earlier request this one follows\n\n${earlier}\n\nJudge only the task below, not this one.`,
+      `## Background: what the user asked for earlier in this conversation\n\n${background
+        .map((text, index) => `${index + 1}. ${text}`)
+        .join("\n")}\n\nJudge only the task below, not these.`,
     );
   }
 
   sections.push(
-    `## The user's task\n\n${run.prompt}`,
+    `## The user's task\n\n${latestPrompt(run)}`,
     `## What the run produced\n\nFinal reply:\n${
       resultText ? truncate(resultText, MAX_RESULT_TEXT_CHARS) : "(the run left no final reply)"
     }`,

@@ -805,6 +805,32 @@ export const continuationSchema = z.enum([
 ]);
 export type Continuation = z.infer<typeof continuationSchema>;
 
+/**
+ * One exchange inside a run: an instruction the user gave, and what the agent
+ * did about it. A run is a conversation, so it has one of these per turn and
+ * the run's own status, result and cost are the latest turn's.
+ *
+ * Kept as records rather than folded into the run row because the whole point
+ * of the history view is that every turn stays readable afterwards: the first
+ * instruction and its answer must survive the fourth.
+ */
+export const runTurnSchema = z.object({
+  /** 1-based position in the conversation. */
+  seq: z.number().int().positive(),
+  prompt: z.string(),
+  status: runStatusSchema,
+  resultText: z.string().nullable(),
+  error: z.string().nullable(),
+  /** What this turn actually ran on; a later turn may differ from the first. */
+  model: z.string().nullable(),
+  costUsd: z.number().nullable(),
+  startedAt: z.iso.datetime().nullable(),
+  finishedAt: z.iso.datetime().nullable(),
+  /** How this turn picked up the ones before it. "none" on the first. */
+  continuation: continuationSchema,
+});
+export type RunTurn = z.infer<typeof runTurnSchema>;
+
 export const runSchema = z.object({
   id: z.uuid(),
   prompt: z.string(),
@@ -840,11 +866,17 @@ export const runSchema = z.object({
    */
   cancelRequestedAt: z.iso.datetime().nullable(),
   /**
-   * The run this one continues. Null on a run started from the composer, which
-   * is every run that predates follow-ups.
+   * Every turn of the conversation, oldest first. Always at least one: a run
+   * that has never been followed up is a conversation of length one.
+   */
+  turns: z.array(runTurnSchema).default([]),
+  /**
+   * A separate run this one continues. Only set on the handful of runs created
+   * while follow-ups were briefly modelled as linked child runs; a follow-up is
+   * a turn of its own run now. Kept so those runs still explain themselves.
    */
   parentRunId: z.uuid().nullable().default(null),
-  /** How much of the earlier run this one actually carries; see `Continuation`. */
+  /** How the latest turn picked up the ones before it; see `Continuation`. */
   continuation: continuationSchema.default("none"),
   /**
    * Whether this run's own session can still be picked up by a follow-up. Read
@@ -863,6 +895,37 @@ export type Run = z.infer<typeof runSchema>;
  */
 export function canFollowUp(run: Pick<Run, "status">): boolean {
   return isTerminalRunStatus(run.status);
+}
+
+/** The turn being worked on, or the last one that was. Never null in practice. */
+export function currentTurn(run: Pick<Run, "turns">): RunTurn | null {
+  return run.turns.at(-1) ?? null;
+}
+
+/**
+ * What the user last asked for, which after a follow-up is not what the run is
+ * called. The run's own prompt stays the first instruction — that is what the
+ * run is about — so anywhere showing "the latest activity" asks for this.
+ */
+export function latestPrompt(run: Pick<Run, "prompt" | "turns">): string {
+  return currentTurn(run)?.prompt ?? run.prompt;
+}
+
+/**
+ * Total time the agent actually spent working, summed over the turns. A run
+ * held open for an hour while the user thought about their next instruction
+ * did not take an hour, and first-start-to-last-finish would claim it did.
+ */
+export function runWorkingMs(run: Pick<Run, "turns">): number | null {
+  let total = 0;
+  let measured = false;
+  for (const turn of run.turns) {
+    if (!turn.startedAt) continue;
+    const end = turn.finishedAt ? new Date(turn.finishedAt).getTime() : Date.now();
+    total += Math.max(0, end - new Date(turn.startedAt).getTime());
+    measured = true;
+  }
+  return measured ? total : null;
 }
 
 /**
@@ -915,12 +978,26 @@ export const runPageSchema = z.object({
 export type RunPage = z.infer<typeof runPageSchema>;
 
 /** Response of GET /api/runs/[id]/steps: the run plus its derived live view. */
+/** One turn with the steps it took, which is what the history thread renders. */
+export const runTurnProgressSchema = runTurnSchema.extend({
+  steps: z.array(runStepSchema),
+});
+export type RunTurnProgress = z.infer<typeof runTurnProgressSchema>;
+
 export const runProgressSchema = z.object({
   run: runSchema,
+  /**
+   * The current turn's steps. Deliberately not every turn's: this is what the
+   * live view watches, and a panel that replayed the whole conversation every
+   * second would bury the thing that is happening now. The full history is in
+   * `turns` below.
+   */
   steps: z.array(runStepSchema),
   phase: runPhaseSchema,
   filesWritten: z.array(z.string()),
   /** Servers the run actually called, by key. Older responses omit it. */
   mcpServersUsed: z.array(z.string()).default([]),
+  /** The whole conversation, oldest turn first. Older responses omit it. */
+  turns: z.array(runTurnProgressSchema).default([]),
 });
 export type RunProgress = z.infer<typeof runProgressSchema>;

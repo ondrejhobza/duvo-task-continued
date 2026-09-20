@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { reconcileCancellation } from "@/lib/agent";
 import { getRun, listRunEvents } from "@/lib/repo";
-import { deriveRunSteps } from "@/lib/steps";
+import { buildRunProgress } from "@/lib/steps";
 
 export async function GET(
   _request: Request,
@@ -21,6 +21,5 @@ export async function GET(
   }
 
   const events = await listRunEvents(id);
-  const derived = deriveRunSteps(events, run.status, run.startedAt);
-  return NextResponse.json({ run, ...derived });
+  return NextResponse.json(buildRunProgress(run, events));
 }

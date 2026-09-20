@@ -3,18 +3,16 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowRight, Brain, ChevronRight, ListChecks } from "lucide-react";
+import { ArrowRight } from "lucide-react";
 import { toast } from "sonner";
 import { ArtifactLinks } from "@/components/artifact-links";
-import { CopyButton } from "@/components/copy-button";
 import { EvaluationBadge } from "@/components/evaluation-badge";
-import { Markdown } from "@/components/markdown";
 import { FailurePanel, findFailingStep } from "@/components/run-detail";
 import { RunClarification } from "@/components/run-clarification";
 import { RunFollowUp } from "@/components/run-follow-up";
 import { RunStatusBadge } from "@/components/run-status-badge";
 import { StopRunButton } from "@/components/run-stop-button";
-import { RunSteps } from "@/components/run-steps";
+import { RunThread } from "@/components/run-thread";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -25,22 +23,17 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
-import { formatDuration, formatMoney } from "@/lib/format";
+import { formatMoney, formatMs } from "@/lib/format";
 import {
   clarificationRoundKey,
   isAwaitingInput,
   isEvaluationInFlight,
   PHASE_LABEL,
   runProgressSchema,
+  runWorkingMs,
   TERMINAL_RUN_STATUSES,
   type Run,
   type RunProgress,
-  type RunStep,
 } from "@/lib/schema";
 
 /**
@@ -73,20 +66,6 @@ async function fetchProgress(id: string): Promise<RunProgress> {
   const parsed = runProgressSchema.safeParse(await response.json());
   if (!parsed.success) throw new Error("Unexpected response from server");
   return parsed.data;
-}
-
-/** The answer so far: the finished summary, else the last thing the agent said. */
-function latestOutput(run: Run, steps: RunStep[]): string | null {
-  if (run.resultText) return run.resultText;
-  for (let i = steps.length - 1; i >= 0; i -= 1) {
-    const step = steps[i];
-    if (step.kind === "text" && step.detail) return step.detail;
-  }
-  return null;
-}
-
-function lastActivity(steps: RunStep[]): string | null {
-  return steps.at(-1)?.title ?? null;
 }
 
 export function LiveRunPanel({ initialProgress }: { initialProgress: RunProgress }) {
@@ -158,11 +137,6 @@ export function LiveRunPanel({ initialProgress }: { initialProgress: RunProgress
   // where the run is neither waiting on the user nor visibly working.
   const resuming = run.status === "awaiting_input" && !paused;
   const failingStep = run.status === "failed" ? findFailingStep(steps) : null;
-  const output = latestOutput(run, steps);
-  const activity = lastActivity(steps);
-  /** The agent is mid-task, so the last step doubles as a progress line. */
-  const working = !paused && !isTerminal(run) && activity !== null;
-  const thinking = steps.filter((step) => step.kind === "thinking");
 
   return (
     <Card>
@@ -206,52 +180,16 @@ export function LiveRunPanel({ initialProgress }: { initialProgress: RunProgress
       <CardContent className="flex flex-col gap-4">
         {run.status === "failed" && <FailurePanel run={run} failingStep={failingStep} />}
 
-        {/* One turn of a conversation: what was asked, then what came back, with
-            the reasoning folded away underneath. Capped and scrolled so a long
-            answer cannot push the rest of the page off the screen. */}
-        <div className="flex max-h-[32rem] flex-col gap-4 overflow-y-auto">
-          <section className="flex flex-col gap-2 rounded-lg border bg-muted/40 p-4">
-            <p className="text-xs font-medium text-muted-foreground">You asked</p>
-            <p className="text-sm leading-relaxed whitespace-pre-wrap">{run.prompt}</p>
-          </section>
-
-          <section className="flex min-w-0 flex-col gap-2 px-1">
-            {(working || output) && (
-              <div className="flex items-start gap-2">
-                {working && (
-                  <p className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
-                    <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-current" />
-                    <span className="truncate">{activity}</span>
-                  </p>
-                )}
-                {/* Copies the markdown source of what is on screen at click
-                    time, so a reply still arriving copies as far as it has got. */}
-                {output && (
-                  <span className="ml-auto">
-                    <CopyButton value={output} label="Copy reply as markdown" />
-                  </span>
-                )}
-              </div>
-            )}
-            {output ? (
-              <Markdown>{output}</Markdown>
-            ) : (
-              <p className="text-sm text-muted-foreground">
-                {midRun
-                  ? "Nothing written yet — it is waiting on the value below."
-                  : paused
-                    ? "Nothing yet — the agent is waiting for your answers below."
-                    : isTerminal(run)
-                      ? "The agent finished without writing a summary."
-                      : "Nothing written yet — the agent is still working."}
-              </p>
-            )}
-          </section>
-
-          {/* Only when the run was actually asked to think: an empty reasoning
-              section is worse than none at all. */}
-          {run.reasoning && <ReasoningBlock steps={thinking} settled={isTerminal(run)} />}
-        </div>
+        {/* The conversation, oldest turn first: what was asked, what came back,
+            what was asked next. Capped and scrolled so a long answer — or a
+            long run — cannot push the rest of the page off the screen. */}
+        <RunThread
+          progress={progress}
+          failingStepSeq={failingStep?.seq ?? null}
+          // Open on arrival when the agent is stuck: what it got through before
+          // it got stuck is the context for the question it is asking.
+          openCurrentSteps={midRun}
+        />
 
         {/* Outside the scroll box on purpose: a card the user has to type into
             must never be half-hidden behind a scrollbar. */}
@@ -267,34 +205,19 @@ export function LiveRunPanel({ initialProgress }: { initialProgress: RunProgress
           />
         )}
 
-        {/* A finished run is not a dead end: the next instruction goes to the
-            agent that did this work, not to the fresh one the box above starts. */}
+        {/* A finished run is not a dead end: the next instruction carries on
+            this conversation as another turn of it, rather than starting the
+            fresh one the box above would. */}
         {isTerminal(run) && <RunFollowUp run={run} />}
-
-        {/* Open by default when the agent stopped mid-way: what it managed to do
-            before it got stuck is the context for the question it is asking. */}
-        <Collapsible defaultOpen={midRun}>
-          <CollapsibleTrigger
-            className="group flex w-full items-center gap-2 rounded-lg px-1 py-1.5 text-left text-sm text-muted-foreground hover:bg-muted/60"
-          >
-            <ListChecks className="size-4" />
-            Every step
-            <span className="tabular-nums">({steps.length})</span>
-            <ChevronRight className="ml-auto size-3.5 transition-transform group-data-[panel-open]:rotate-90" />
-          </CollapsibleTrigger>
-          <CollapsibleContent>
-            <div className="pt-2">
-              <RunSteps progress={progress} failingStepSeq={failingStep?.seq ?? null} />
-            </div>
-          </CollapsibleContent>
-        </Collapsible>
 
         {isTerminal(run) && (
           <div className="flex flex-col gap-2 rounded-lg border bg-muted/40 p-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="text-xs font-medium text-muted-foreground">Output files</p>
               <p className="text-xs text-muted-foreground tabular-nums">
-                {formatDuration(run.startedAt, run.finishedAt)} · {formatMoney(run.costUsd)}
+                {/* Working time and cost across every turn, which is what this
+                    run has actually taken and cost. */}
+                {formatMs(runWorkingMs(run))} · {formatMoney(run.costUsd)}
               </p>
             </div>
             <ArtifactLinks artifacts={run.artifacts} emptyLabel="No files — the answer is above." />
@@ -305,43 +228,3 @@ export function LiveRunPanel({ initialProgress }: { initialProgress: RunProgress
   );
 }
 
-/**
- * Extended thinking, folded away. It is long, repetitive and not the answer;
- * one line says whether there is any, and opening it shows the lot.
- */
-function ReasoningBlock({ steps, settled }: { steps: RunStep[]; settled: boolean }) {
-  if (steps.length === 0) {
-    // Reasoning was switched on but the model volunteered none. Say so once the
-    // run is over; while it runs, there may still be some coming.
-    if (!settled) return null;
-    return (
-      <p className="flex items-center gap-2 px-1 text-sm text-muted-foreground">
-        <Brain className="size-4" />
-        The model returned no reasoning for this run.
-      </p>
-    );
-  }
-
-  return (
-    <Collapsible>
-      <CollapsibleTrigger className="group flex w-full items-center gap-2 rounded-lg px-1 py-1.5 text-left text-sm text-muted-foreground hover:bg-muted/60">
-        <Brain className="size-4" />
-        Reasoning
-        <span className="tabular-nums">({steps.length})</span>
-        <ChevronRight className="ml-auto size-3.5 transition-transform group-data-[panel-open]:rotate-90" />
-      </CollapsibleTrigger>
-      <CollapsibleContent>
-        <div className="mt-2 flex max-h-64 flex-col gap-3 overflow-y-auto rounded-lg border bg-muted/40 p-4">
-          {steps.map((step) => (
-            <p
-              key={step.seq}
-              className="text-sm leading-relaxed whitespace-pre-wrap text-muted-foreground italic"
-            >
-              {step.detail ?? step.title}
-            </p>
-          ))}
-        </div>
-      </CollapsibleContent>
-    </Collapsible>
-  );
-}

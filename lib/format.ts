@@ -31,7 +31,17 @@ export function formatDuration(
   endIso: string | null | undefined,
 ): string {
   if (!startIso || !endIso) return "—";
-  const ms = new Date(endIso).getTime() - new Date(startIso).getTime();
+  return formatMs(new Date(endIso).getTime() - new Date(startIso).getTime());
+}
+
+/**
+ * A span already measured in milliseconds. A multi-turn run's duration is the
+ * sum of its turns, not the gap between the first start and the last finish:
+ * the hour a run spent waiting for the user's next instruction is not time the
+ * agent spent working.
+ */
+export function formatMs(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined) return "—";
   if (ms < 1000) return `${ms} ms`;
   const seconds = Math.round(ms / 1000);
   if (seconds < 60) return `${seconds} s`;

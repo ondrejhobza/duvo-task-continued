@@ -7,7 +7,7 @@ import { StopRunButton } from "@/components/run-stop-button";
 import { Button } from "@/components/ui/button";
 import { findActiveRun, getRun, listRunContinuations, listRunEvents } from "@/lib/repo";
 import type { Run } from "@/lib/schema";
-import { deriveRunSteps } from "@/lib/steps";
+import { buildRunProgress } from "@/lib/steps";
 
 export const dynamic = "force-dynamic";
 
@@ -22,9 +22,11 @@ export default async function RunPage({ params }: PageProps<"/runs/[id]">) {
     listRunContinuations(run.id),
     findActiveRun(),
   ]);
-  const derived = deriveRunSteps(events, run.status, run.startedAt, run.cancelRequestedAt !== null);
-  // A run cannot be continued while any run is going, including this one.
-  const busyReason = active === null ? null : followUpBusyReason(active);
+  const progress = buildRunProgress(run, events);
+  // A run cannot be continued while another one is going. This run being the
+  // active one is not a reason: its own follow-up field is only offered once
+  // it has finished anyway.
+  const busyReason = active === null || active.id === run.id ? null : followUpBusyReason(active);
 
   return (
     <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 p-4 sm:p-6">
@@ -37,7 +39,7 @@ export default async function RunPage({ params }: PageProps<"/runs/[id]">) {
 
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex min-w-0 flex-col gap-2">
-          <RunHeading run={run} mcpServersUsed={derived.mcpServersUsed} />
+          <RunHeading run={run} mcpServersUsed={progress.mcpServersUsed} />
           <h1 className="line-clamp-2 text-2xl font-semibold tracking-tight" title={run.prompt}>
             {run.prompt}
           </h1>
@@ -50,15 +52,18 @@ export default async function RunPage({ params }: PageProps<"/runs/[id]">) {
 
       <RunChain run={run} parent={parent} continuations={continuations} />
 
-      <RunDetail initialProgress={{ run, ...derived }} busyReason={busyReason} />
+      <RunDetail initialProgress={progress} busyReason={busyReason} />
     </main>
   );
 }
 
 /**
- * Where this run sits in a chain of follow-ups, and how to get to the rest of
- * it. Absent for a run that neither continues anything nor was continued, which
- * is most of them.
+ * Links to the runs either side of this one.
+ *
+ * Only a handful of runs have any: a follow-up is a turn of its own run now,
+ * and shows up in the conversation below rather than as a separate record.
+ * These are the ones made while it worked the other way, kept navigable rather
+ * than rewritten, so nothing the user did disappears.
  */
 function RunChain({
   run,
@@ -73,7 +78,9 @@ function RunChain({
 
   return (
     <section className="flex flex-col gap-2 rounded-xl border bg-card p-4">
-      <p className="text-xs font-medium text-muted-foreground">Part of a longer conversation</p>
+      <p className="text-xs font-medium text-muted-foreground">
+        Recorded as separate runs, before follow-ups became turns of one run
+      </p>
 
       {parent && (
         <p className="flex flex-wrap items-center gap-2 text-sm">

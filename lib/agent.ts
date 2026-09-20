@@ -8,7 +8,8 @@ import { evaluateRun, recordCancelledEvaluation } from "@/lib/evaluate";
 import { routeModel, type RoutingOutcome } from "@/lib/model-router";
 import {
   appendRunEvent,
-  finishRun,
+  currentTurnSeq,
+  finishTurn,
   getRun,
   getRunCancellation,
   getRunSession,
@@ -17,10 +18,10 @@ import {
   markClarificationChecked,
   markRunCancelled,
   markRunning,
+  markTurnRunning,
   pauseRunForClarification,
   replaceRunArtifacts,
   saveResolvedModel,
-  saveRunContinuation,
   saveRunSession,
   type McpServerConfigRow,
 } from "@/lib/repo";
@@ -29,9 +30,12 @@ import {
   isAutoSelection,
   isTerminalRunStatus,
   modelSupportsReasoning,
+  latestPrompt,
   resolveAgentModelId,
   type AgentModelId,
+  type Continuation,
   type Run,
+  type RunTurn,
 } from "@/lib/schema";
 import { bearerTokenFor, McpAuthError, refreshAdvertisedTools } from "@/lib/mcp-oauth";
 import { namedInPrompt, selectMcpServers } from "@/lib/mcp-relevance";
@@ -286,13 +290,16 @@ async function resolveClarification(run: Run): Promise<"paused" | "continue"> {
 
 /** The user's task plus whatever the question round added to it. */
 function composePrompt(run: Run): string {
+  // What to work on now is the current turn's instruction, not the one the run
+  // was started with — those are the same thing only until the first follow-up.
+  const prompt = latestPrompt(run);
   const { state, questions, answers } = run.clarification;
-  if (state !== "answered" && state !== "skipped") return run.prompt;
+  if (state !== "answered" && state !== "skipped") return prompt;
 
   const context = formatClarificationContext(questions, answers);
-  if (context) return `${run.prompt}\n\n${context}`;
+  if (context) return `${prompt}\n\n${context}`;
   return [
-    run.prompt,
+    prompt,
     "The user was asked to clarify this task and chose not to answer. Proceed on the most reasonable reading, and state the assumptions you made in your summary.",
   ].join("\n\n");
 }
@@ -340,31 +347,38 @@ interface Continued {
 }
 
 /**
- * Works out what a follow-up actually inherits.
+ * Works out what the turn about to run actually inherits.
  *
  * Reopening the session is the real feature: the agent carries on as the same
  * conversation, remembering its own reasoning and the files it wrote. That is
- * only possible while the transcript is on disk, so when it is not — a run from
- * before sessions were kept, or a transcript since cleared — the follow-up
- * falls back to a fresh agent handed a summary of what happened. The two are
- * recorded differently on the run, and the UI says which one the user got.
+ * only possible while the transcript is on disk, so when it is not — a run
+ * from before sessions were kept, or a transcript since cleared — the turn
+ * falls back to a fresh agent handed a written account of the turns before it.
+ * The two are recorded differently on the turn, and the UI says which the user
+ * got, because the difference decides whether their follow-up makes sense.
  */
-async function resolveContinuation(run: Run): Promise<Continued> {
-  if (run.parentRunId === null) {
-    return { resume: null, cwd: runWorkspaceDir(run.id), brief: null };
+async function resolveContinuation(run: Run, turnSeq: number): Promise<Continued> {
+  // A run's turns all happen in the run's own workspace, so the agent can read
+  // and edit what earlier turns wrote. The exception is a run created while
+  // follow-ups were briefly separate records: it borrows its parent's.
+  const cwd = await runChainWorkspaceDir(run);
+  if (turnSeq <= 1 && run.parentRunId === null) {
+    return { resume: null, cwd, brief: null };
   }
 
-  const parent = await getRun(run.parentRunId);
-  if (!parent) return { resume: null, cwd: runWorkspaceDir(run.id), brief: null };
-
-  // The chain shares one workspace, so a follow-up can read, edit and build on
-  // the files the first run produced instead of starting on an empty directory.
-  const cwd = await runChainWorkspaceDir(parent);
-  const sessionId = await getRunSession(parent.id);
+  // Later turns reopen this run's own session — literally the same
+  // conversation, not a copy of it. A legacy child run reopens its parent's.
+  const sourceId = turnSeq > 1 ? run.id : (run.parentRunId ?? run.id);
+  const sessionId = await getRunSession(sourceId);
   if (sessionId && (await sessionTranscriptExists(sessionId, cwd))) {
     return { resume: sessionId, cwd, brief: null };
   }
-  return { resume: null, cwd, brief: describeEarlierRun(parent) };
+
+  const earlier =
+    turnSeq > 1
+      ? run.turns.filter((turn) => turn.seq < turnSeq)
+      : ((await getRun(run.parentRunId ?? "")) ?? { turns: [] }).turns;
+  return { resume: null, cwd, brief: describeEarlierTurns(run, earlier) };
 }
 
 /** Follows the chain to the run that owns the workspace the others share. */
@@ -380,26 +394,34 @@ export async function runChainWorkspaceDir(run: Run): Promise<string> {
   return runWorkspaceDir(current.id);
 }
 
-/** What a fresh agent is told about the run it is continuing, when it cannot remember it. */
-function describeEarlierRun(parent: Run): string {
-  const outcome =
-    parent.status === "cancelled"
-      ? "The user stopped it before it finished."
-      : parent.status === "failed"
-        ? `It ended in an error: ${parent.error ?? "no detail was recorded"}.`
-        : "It finished.";
+/** What a fresh agent is told about the turns it cannot remember taking. */
+function describeEarlierTurns(run: Run, earlier: readonly RunTurn[]): string {
+  const exchanges = earlier.map((turn) => {
+    const outcome =
+      turn.status === "cancelled"
+        ? "(the user stopped this one part-way)"
+        : turn.status === "failed"
+          ? `(this one ended in an error: ${turn.error ?? "no detail was recorded"})`
+          : "";
+    return [
+      `They asked: ${turn.prompt}`,
+      outcome,
+      turn.resultText ? `You replied:\n${turn.resultText}` : "You left no reply.",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  });
+
   const files =
-    parent.artifacts.length > 0
-      ? `Files it left in this workspace, which you can read and edit: ${parent.artifacts.map((a) => a.name).join(", ")}.`
-      : "It left no files.";
+    run.artifacts.length > 0
+      ? `Files left in this workspace, which you can read and edit: ${run.artifacts.map((a) => a.name).join(", ")}.`
+      : "No files were left in the workspace.";
 
   return [
-    "You are continuing earlier work, but you do not remember it: this is a new session, so what follows is all you have.",
-    `The earlier instruction was: ${parent.prompt}`,
-    outcome,
-    parent.resultText ? `What it reported back:\n${parent.resultText}` : null,
+    "You are continuing a conversation you do not remember: the earlier session could not be reopened, so the account below is all you have of it.",
+    exchanges.join("\n\n"),
     files,
-    "Say plainly in your summary if the request below needs something from that earlier work that you were not given.",
+    "Say plainly in your summary if the request below depends on something from that earlier work that you were not given.",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -415,8 +437,13 @@ export async function runAgent(runId: string): Promise<void> {
   if (!run) return;
   if (isTerminalRunStatus(run.status)) return;
 
-  const continued = await resolveContinuation(run);
+  // Everything below belongs to one turn of the conversation: its events are
+  // tagged with it, and its outcome closes it before rolling up into the run.
+  const turn = await currentTurnSeq(runId);
+  const continued = await resolveContinuation(run, turn);
   const cwd = continued.cwd;
+  const continuation: Continuation =
+    turn === 1 && run.parentRunId === null ? "none" : continued.resume ? "resumed" : "seeded";
 
   // Stopped before this loop ever got going — while it sat queued, or while it
   // was parked on the pre-run questions. Nothing has started, so nothing has to
@@ -432,6 +459,7 @@ export async function runAgent(runId: string): Promise<void> {
 
   const claimed = await markRunning(runId);
   if (!claimed) return;
+  await markTurnRunning(runId, turn, continuation);
 
   await mkdir(cwd, { recursive: true });
 
@@ -538,14 +566,14 @@ export async function runAgent(runId: string): Promise<void> {
       return;
     }
 
-    // Said out loud, because the difference matters to whoever reads the run:
-    // one of these agents remembers the earlier work, the other was told about it.
-    if (run.parentRunId !== null) {
-      await saveRunContinuation(runId, continued.resume ? "resumed" : "seeded");
+    // Said out loud at the head of the turn, because the difference matters to
+    // whoever reads it back: one of these agents remembers the earlier turns,
+    // the other has only been told about them.
+    if (turn > 1 || run.parentRunId !== null) {
       await appendRunEvent(runId, "clarification_notice", {
         message: continued.resume
-          ? "Continuing the earlier run in the same session: the agent still has everything it did before."
-          : "The earlier session could not be reopened, so this run starts fresh with a written summary of it. The agent does not remember the earlier work itself.",
+          ? "Carrying on in the same session: the agent still has everything it did earlier in this run."
+          : "The earlier session could not be reopened, so this turn starts fresh with a written summary of what came before. The agent does not remember that work itself.",
       });
     }
 
@@ -555,10 +583,15 @@ export async function runAgent(runId: string): Promise<void> {
         : composePrompt(run),
       options: {
         cwd,
-        // Reopens the earlier conversation, which is what makes a follow-up a
-        // continuation rather than a restart. Forked so each follow-up is its
-        // own branch and two of them cannot overwrite one another's history.
-        ...(continued.resume ? { resume: continued.resume, forkSession: true } : {}),
+        // Reopens the conversation, which is what makes a follow-up a
+        // continuation rather than a restart. Not forked: the turns of a run
+        // are one thread and belong in one session, and only one turn can be
+        // open at a time, so there is nothing to branch away from. The
+        // exception is a legacy child run, which must not write into the
+        // session its parent still owns.
+        ...(continued.resume
+          ? { resume: continued.resume, ...(run.parentRunId !== null ? { forkSession: true } : {}) }
+          : {}),
         // Aborts the CLI's in-flight work, so a stop lands within a second
         // instead of waiting out the current model or tool call.
         abortController,
@@ -622,13 +655,14 @@ export async function runAgent(runId: string): Promise<void> {
     await replaceRunArtifacts(runId, await collectArtifacts(cwd));
 
     const failure = describeFailure(result);
-    await finishRun(runId, {
+    await finishTurn(runId, turn, {
       status: failure ? "failed" : "succeeded",
       resultText: result.subtype === "success" ? result.result : null,
       error: failure || null,
       model,
       costUsd: result.total_cost_usd,
       numTurns: result.num_turns,
+      continuation,
     });
   } catch (error) {
     // The abort the stop fired surfaces here as a thrown error. A run the user
@@ -642,13 +676,14 @@ export async function runAgent(runId: string): Promise<void> {
     await appendRunEvent(runId, "runner_error", { message });
     // Keep whatever the agent managed to write before the failure.
     await replaceRunArtifacts(runId, await collectArtifacts(cwd)).catch(() => undefined);
-    await finishRun(runId, {
+    await finishTurn(runId, turn, {
       status: "failed",
       resultText: null,
       error: message,
       model,
       costUsd: null,
       numTurns: null,
+      continuation,
     });
   } finally {
     clearInterval(stopWatch);

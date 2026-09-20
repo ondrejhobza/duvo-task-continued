@@ -167,19 +167,50 @@ export function RunSteps({
           {active ? "Waiting for the agent's first step…" : "This run produced no steps."}
         </p>
       ) : (
-        <ol ref={listRef} className="flex max-h-[32rem] flex-col gap-1 overflow-y-auto pr-1">
-          {steps.map((step, index) => (
-            <StepItem
-              key={step.seq + ":" + index}
-              step={step}
-              attachedServers={progress?.run.mcpServers ?? []}
-              isLast={index === steps.length - 1 && active}
-              failed={step.seq === failingStepSeq}
-            />
-          ))}
-        </ol>
+        <StepList
+          ref={listRef}
+          steps={steps}
+          attachedServers={progress.run.mcpServers}
+          active={active}
+          failingStepSeq={failingStepSeq}
+        />
       )}
     </div>
+  );
+}
+
+/**
+ * The play-by-play on its own, without the header. Shared with the history
+ * thread, which renders one of these per turn: the steps of a run should look
+ * and behave the same wherever they are read back.
+ */
+export function StepList({
+  ref,
+  steps,
+  attachedServers,
+  active,
+  failingStepSeq = null,
+}: {
+  ref?: React.Ref<HTMLOListElement>;
+  steps: readonly RunStep[];
+  /** Server names as of this run, for turning a tool's server key into a label. */
+  attachedServers: readonly string[];
+  /** The steps are still arriving: the last one pulses and the clock runs. */
+  active: boolean;
+  failingStepSeq?: number | null;
+}) {
+  return (
+    <ol ref={ref} className="flex max-h-[32rem] flex-col gap-1 overflow-y-auto pr-1">
+      {steps.map((step, index) => (
+        <StepItem
+          key={step.seq + ":" + index}
+          step={step}
+          attachedServers={attachedServers}
+          isLast={index === steps.length - 1 && active}
+          failed={step.seq === failingStepSeq}
+        />
+      ))}
+    </ol>
   );
 }
 

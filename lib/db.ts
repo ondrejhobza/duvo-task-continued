@@ -56,11 +56,16 @@ export interface RunsTable {
   finished_at: ColumnType<Date | null, string | null, string | null>;
   /** When the user asked for the run to stop; null on runs nobody stopped. */
   cancel_requested_at: ColumnType<Date | null, string | null, string | null>;
+  /**
+   * When the run last moved, which on a run that can be continued days later
+   * is not when it was created. Decides which run is the live one.
+   */
+  last_activity_at: ColumnType<Date | null, string | null, string | null>;
   /** The agent session this run held, so a follow-up can resume the conversation. */
   session_id: string | null;
-  /** The run this one continues, when it was started as a follow-up. */
+  /** A separate, earlier run this one continues. Only on legacy follow-ups. */
   parent_run_id: string | null;
-  /** How the follow-up got its context; see `Continuation`. */
+  /** How the latest turn got its context; see `Continuation`. */
   continuation: ColumnType<Continuation, Continuation | undefined, Continuation>;
 }
 
@@ -71,6 +76,29 @@ export interface RunEventsTable {
   type: string;
   payload: ColumnType<unknown, string, never>;
   created_at: ColumnType<Date, string | undefined, never>;
+  /** Which turn of the conversation produced this event; 1 for a single-turn run. */
+  turn: ColumnType<number, number | undefined, number>;
+}
+
+/**
+ * One instruction and what came of it. A run owns an ordered list of these:
+ * the first is the task it was started with, and each follow-up adds another.
+ */
+export interface RunTurnsTable {
+  id: string;
+  run_id: string;
+  seq: number;
+  prompt: string;
+  status: RunStatus;
+  result_text: string | null;
+  error: string | null;
+  model: string | null;
+  cost_usd: ColumnType<string | null, number | null, number | null>;
+  num_turns: number | null;
+  continuation: ColumnType<Continuation, Continuation | undefined, Continuation>;
+  created_at: ColumnType<Date, string | undefined, never>;
+  started_at: ColumnType<Date | null, string | null, string | null>;
+  finished_at: ColumnType<Date | null, string | null, string | null>;
 }
 
 export interface RunArtifactsTable {
@@ -137,6 +165,7 @@ export interface RunEvaluationsTable {
 export interface Database {
   run_evaluations: RunEvaluationsTable;
   runs: RunsTable;
+  run_turns: RunTurnsTable;
   run_events: RunEventsTable;
   run_artifacts: RunArtifactsTable;
   mcp_servers: McpServersTable;
@@ -317,6 +346,66 @@ export async function ensureSchema(db: Kysely<Database>): Promise<void> {
 
   await sql`
     create index if not exists runs_parent_run_id_idx on runs (parent_run_id)
+  `.execute(db);
+
+  // When the run last did something, as opposed to when it was started. The
+  // two used to be interchangeable; a run that can be picked up again days
+  // later needs both, so "which run is live" cannot be answered by age alone.
+  await sql`
+    alter table runs add column if not exists last_activity_at timestamptz
+  `.execute(db);
+  await sql`
+    update runs
+       set last_activity_at = coalesce(finished_at, started_at, created_at)
+     where last_activity_at is null
+  `.execute(db);
+
+  // A run is a conversation: one row here per instruction in it.
+  await sql`
+    create table if not exists run_turns (
+      id text primary key,
+      run_id text not null references runs(id) on delete cascade,
+      seq integer not null,
+      prompt text not null,
+      status text not null,
+      result_text text,
+      error text,
+      model text,
+      cost_usd numeric,
+      num_turns integer,
+      continuation text not null default 'none',
+      created_at timestamptz not null default now(),
+      started_at timestamptz,
+      finished_at timestamptz,
+      unique (run_id, seq)
+    )
+  `.execute(db);
+
+  // Events belong to the turn that produced them, so the history view can show
+  // each turn's steps under the instruction that caused them. Existing events
+  // all belong to the only turn their run has ever had.
+  await sql`
+    alter table run_events add column if not exists turn integer not null default 1
+  `.execute(db);
+
+  // Every run that predates this table is a conversation of exactly one turn,
+  // and its own row already holds that turn's instruction and outcome. Copying
+  // it across is what lets every view read turns without special-casing age.
+  // The turn takes the run's id: unique by construction, since the ids minted
+  // for later turns are fresh.
+  await sql`
+    insert into run_turns (
+      id, run_id, seq, prompt, status, result_text, error, model,
+      cost_usd, num_turns, created_at, started_at, finished_at, continuation
+    )
+    select
+      r.id, r.id, 1, r.prompt, r.status, r.result_text, r.error, r.model,
+      r.cost_usd, r.num_turns, r.created_at, r.started_at, r.finished_at,
+      -- Meaningful only on the few runs recorded as follow-ups of another run;
+      -- 'none' on every run that started from the composer.
+      r.continuation
+    from runs r
+    where not exists (select 1 from run_turns t where t.run_id = r.id)
   `.execute(db);
 
   // Paging is keyset on (created_at, id); this is the index that ordering wants.

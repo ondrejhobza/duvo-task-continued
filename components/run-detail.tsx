@@ -5,17 +5,16 @@ import { useRouter } from "next/navigation";
 import { Brain, Check, Copy, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 import { ArtifactLinks } from "@/components/artifact-links";
-import { CopyButton } from "@/components/copy-button";
 import { EvaluationBadge } from "@/components/evaluation-badge";
-import { Markdown } from "@/components/markdown";
 import { RunClarification } from "@/components/run-clarification";
 import { RunEvaluation } from "@/components/run-evaluation";
 import { RunFollowUp } from "@/components/run-follow-up";
 import { RunStatusBadge } from "@/components/run-status-badge";
 import { RunSteps } from "@/components/run-steps";
+import { RunThread } from "@/components/run-thread";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { formatDateTime, formatDuration, formatMoney } from "@/lib/format";
+import { formatDateTime, formatMoney, formatMs } from "@/lib/format";
 import { mcpServerLabel } from "@/lib/mcp-label";
 import {
   clarificationRoundKey,
@@ -23,6 +22,7 @@ import {
   isAwaitingInput,
   isEvaluationInFlight,
   runProgressSchema,
+  runWorkingMs,
   TERMINAL_RUN_STATUSES,
   type Run,
   type RunProgress,
@@ -157,38 +157,38 @@ export function RunDetail({
 
       <section className="grid gap-4 sm:grid-cols-4">
         <SummaryStat label="Started" value={formatDateTime(run.createdAt)} />
-        <SummaryStat label="Duration" value={formatDuration(run.startedAt, run.finishedAt)} />
+        {/* Time the agent spent working, summed over the turns — not the wall
+            clock from the first turn to the last, which would count the time
+            the run sat finished waiting for the user's next instruction. */}
+        <SummaryStat label="Working time" value={formatMs(runWorkingMs(run))} />
         <SummaryStat label="Cost" value={formatMoney(run.costUsd)} />
-        <SummaryStat label="Turns" value={run.numTurns === null ? "—" : String(run.numTurns)} />
+        <SummaryStat
+          label={progress.turns.length > 1 ? "Turns in this conversation" : "Turns"}
+          value={
+            progress.turns.length > 1
+              ? String(progress.turns.length)
+              : run.numTurns === null
+                ? "—"
+                : String(run.numTurns)
+          }
+        />
       </section>
 
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+      {/* The conversation leads now, and takes the wider column: the play-by-play
+          beside it is supporting evidence for whichever turn is current. */}
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <div className="flex flex-col gap-4">
-          <Panel title="Instructions">
-            <p className="whitespace-pre-wrap text-sm leading-relaxed">{run.prompt}</p>
+          {/* The conversation in full: every instruction, every reply, oldest
+              first, in its own scroll box. */}
+          <Panel title={progress.turns.length > 1 ? "Conversation" : "Instructions and result"}>
+            <RunThread
+              progress={progress}
+              failingStepSeq={failingStep?.seq ?? null}
+              // The current turn's steps are already beside this, in full.
+              currentTurnSteps={false}
+              heightClass="max-h-[44rem]"
+            />
           </Panel>
-
-          {run.status === "succeeded" && (
-            <Panel
-              title="Result"
-              // Nothing to copy is not worth an empty clipboard, so the control
-              // only exists when the agent actually wrote a reply. What goes on
-              // the clipboard is the markdown source rendered below.
-              action={
-                run.resultText ? (
-                  <CopyButton value={run.resultText} label="Copy reply as markdown" />
-                ) : null
-              }
-            >
-              {run.resultText ? (
-                <Markdown>{run.resultText}</Markdown>
-              ) : (
-                <p className="text-sm text-muted-foreground">
-                  The agent finished without writing a summary.
-                </p>
-              )}
-            </Panel>
-          )}
 
           {/* Reads in the order the work happened: what was asked, what came
               back, and the box that takes it further. */}
