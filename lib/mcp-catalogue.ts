@@ -14,11 +14,11 @@ import { NOTION_REMOTE_URL } from "@/lib/schema";
 /**
  * What the "Connect MCP" directory offers.
  *
- * Brand marks come from svgl.app and are vendored into `public/logos` rather
- * than hot-linked: a third-party request per render would be a privacy leak and
- * a broken icon the day they move the file. Every mark is drawn on a constant
- * light tile, because several of them (Notion's especially) are near-black and
- * vanish on a dark surface, and recolouring a brand mark is not an option.
+ * Brand marks come from svgl.app and thesvg.org and are vendored into
+ * `public/logos` rather than hot-linked: a third-party request per render would
+ * be a privacy leak and a broken icon the day they move the file. Each is
+ * unmodified apart from dropping the root `width`/`height`, so every mark
+ * scales from its own viewBox and sits at the same optical size.
  *
  * Adding a real integration is one entry with `available: true` and a URL.
  */
@@ -28,9 +28,9 @@ export interface McpCatalogueEntry {
   name: string;
   /** One line on what the agent would be able to reach. */
   description: string;
-  /** Vendored svgl.app brand mark, served straight from `public/`. */
+  /** Vendored brand mark, served straight from `public/`. */
   logo?: string;
-  /** Category glyph, used when svgl.app has no mark for the service. */
+  /** Category glyph, used when no brand mark could be sourced. */
   icon: LucideIcon;
   /** False for entries that only signpost where this is going; they cannot be connected. */
   available: boolean;
@@ -49,10 +49,10 @@ export const MCP_CATALOGUE: readonly McpCatalogueEntry[] = [
     url: NOTION_REMOTE_URL,
   },
   {
-    // svgl.app has no Airtable mark, so this one keeps a category glyph.
     id: "airtable",
     name: "Airtable",
     description: "Bases, tables and records",
+    logo: "/logos/airtable.svg",
     icon: Table2,
     available: false,
   },
@@ -65,10 +65,10 @@ export const MCP_CATALOGUE: readonly McpCatalogueEntry[] = [
     available: false,
   },
   {
-    // svgl.app has no Google Docs mark either.
     id: "google-docs",
     name: "Google Docs",
     description: "Documents and comments",
+    logo: "/logos/google-docs.svg",
     icon: FileText,
     available: false,
   },

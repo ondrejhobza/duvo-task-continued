@@ -49,15 +49,18 @@ import {
 } from "@/lib/schema";
 
 /**
- * A catalogue entry's mark, on a constant light tile. The tile is what makes
- * near-black brand marks (Notion) survive dark mode without recolouring them,
- * and it gives logos and fallback glyphs the same optical baseline. `unoptimized`
- * serves the vendored SVG straight from `public/` instead of the image pipeline.
+ * A catalogue entry's mark on a raised tile, one size for every entry so a
+ * brand logo and a fallback glyph share an optical baseline. The tile is
+ * `bg-card` — a token, and a step above the `bg-muted/40` row it sits on —
+ * rather than a hardcoded white: every vendored mark is either multi-colour or
+ * carries its own light fill (Notion's page is `#FFF`), so none of them needs a
+ * light backdrop to stay legible in dark mode. `unoptimized` serves the
+ * vendored SVG straight from `public/` instead of the image pipeline.
  */
 function McpLogo({ entry }: { entry: McpCatalogueEntry | undefined }) {
   const Fallback = entry?.icon ?? Plug;
   return (
-    <span className="flex size-7 shrink-0 items-center justify-center rounded-md border bg-white">
+    <span className="flex size-7 shrink-0 items-center justify-center rounded-md border bg-card">
       {entry?.logo ? (
         <Image
           src={entry.logo}
@@ -68,7 +71,7 @@ function McpLogo({ entry }: { entry: McpCatalogueEntry | undefined }) {
           className="size-4 object-contain"
         />
       ) : (
-        <Fallback className="size-4 text-neutral-600" />
+        <Fallback className="size-4 text-muted-foreground" />
       )}
     </span>
   );
