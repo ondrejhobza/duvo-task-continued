@@ -43,3 +43,6 @@ next-env.d.ts
 # local runtime data
 /.pglite/
 /.runs/
+
+# scratch: throwaway headless browser profile from screenshot capture
+/.tmp-shots/

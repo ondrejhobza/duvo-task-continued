@@ -2,6 +2,18 @@
 
 A small agentic automation platform. You give an agent instructions in plain text, it works unattended through the Claude Agent SDK, you watch it unfold step by step, download whatever it produced, optionally let it read and, if you allow it, change your Notion workspace over MCP, and evaluate whether the run did what was asked.
 
+![The home page: summary stats, the prompt composer, and the latest run continuing as a multi-turn conversation above the recent runs table](docs/screenshots/home.png)
+
+*The home page. The latest run stays on screen as a thread you can carry on from, with every earlier turn still readable above it.*
+
+![A finished run: the agent's result with sources, its step-by-step trace, the automatic verdict, and the CSV it produced](docs/screenshots/run-detail.png)
+
+*A finished run. Steps on the right, the result and the produced file on the left, and a separate verdict on whether the run actually did what was asked.*
+
+![A failed run: a red panel naming the error, with the failing step highlighted in the trace](docs/screenshots/run-failed.png)
+
+*A failed run. The error is stated at the top and marked in the trace, and the run can be continued with a different instruction rather than being a dead end.*
+
 ## What it does
 
 1. **Run instructions**: type a task, press Run. The agent can search and read the web and write files into a private per-run workspace. Runs are persisted, so a refresh never loses anything.
